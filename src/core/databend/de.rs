@@ -43,6 +43,11 @@ pub struct Deserializer<'de> {
     raw: &'de RawJsonb<'de>,
 }
 
+enum BytesOrString {
+    Bytes(Vec<u8>),
+    String(String),
+}
+
 impl<'de> Deserializer<'de> {
     /// Creates a new `Deserializer` from a `RawJsonb`.
     ///
@@ -272,6 +277,34 @@ impl<'de> Deserializer<'de> {
     fn read_string(&mut self) -> Result<String> {
         let s = self.read_str()?;
         Ok(s.to_string())
+    }
+
+    // Reads a value for `deserialize_bytes`: a binary extension value yields
+    // its raw bytes, anything else that can be read as a string stays a string.
+    fn read_bytes(&mut self) -> Result<BytesOrString> {
+        let jentry_res = self.read_scalar_jentry();
+        if jentry_res == Err(Error::UnexpectedType) {
+            return Err(Error::UnexpectedType);
+        }
+        let jentry = jentry_res?;
+        match jentry.type_code {
+            STRING_TAG => {
+                let length = jentry.length as usize;
+                let s = self.read_payload_str(length)?;
+                Ok(BytesOrString::String(s.to_string()))
+            }
+            EXTENSION_TAG => {
+                let length = jentry.length as usize;
+                match self.read_payload_extension(length)? {
+                    ExtensionValue::Binary(v) => Ok(BytesOrString::Bytes(v.to_vec())),
+                    val => Ok(BytesOrString::String(format!("{}", val))),
+                }
+            }
+            NULL_TAG | FALSE_TAG | TRUE_TAG | NUMBER_TAG | CONTAINER_TAG => {
+                Err(Error::UnexpectedType)
+            }
+            _ => Err(Error::InvalidJsonb),
+        }
     }
 
     fn read_with_jentry<V>(&mut self, jentry: JEntry, visitor: V) -> Result<V::Value>
@@ -511,14 +544,17 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_string(self.read_string()?)
+        match self.read_bytes()? {
+            BytesOrString::Bytes(v) => visitor.visit_byte_buf(v),
+            BytesOrString::String(s) => visitor.visit_string(s),
+        }
     }
 
     fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_string(self.read_string()?)
+        self.deserialize_bytes(visitor)
     }
 
     fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
@@ -679,11 +715,13 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         self.deserialize_str(visitor)
     }
 
-    fn deserialize_ignored_any<V>(self, _visitor: V) -> Result<V::Value>
+    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        todo!()
+        // The value still has to be walked so that the read position ends up
+        // behind it; the visitor simply discards everything it is given.
+        self.deserialize_any(visitor)
     }
 
     #[inline]

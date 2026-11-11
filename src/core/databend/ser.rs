@@ -240,8 +240,21 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         self.write_str(v)
     }
 
-    fn serialize_bytes(self, _v: &[u8]) -> Result<Self::Ok> {
-        todo!()
+    fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok> {
+        // Bytes are stored as a binary extension value, the same encoding
+        // that is used for `Value::Binary`.
+        self.buffer.write_u32::<BigEndian>(SCALAR_CONTAINER_TAG)?;
+        let mut jentry_index = self.buffer.len();
+        let payload_index = jentry_index + 4;
+        // resize buffer to keep space for jentry.
+        self.buffer.resize(payload_index, 0);
+
+        let _ = ExtensionValue::Binary(v).compact_encode(&mut self.buffer)?;
+        let len = self.buffer.len() - payload_index;
+        let jentry = JEntry::make_extension_jentry(len);
+
+        self.replace_jentry(jentry, &mut jentry_index);
+        Ok(())
     }
 
     fn serialize_none(self) -> Result<Self::Ok> {

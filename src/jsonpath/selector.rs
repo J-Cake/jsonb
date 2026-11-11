@@ -483,7 +483,16 @@ impl<'a> Selector<'a> {
                 Path::ArrayIndices(array_indices) => {
                     self.select_array_values_by_indices(item, array_indices)?;
                 }
-                _ => todo!(),
+                Path::Root | Path::Current => {
+                    // Both refer to the item itself, keep it unchanged.
+                    self.items.push_back(item);
+                }
+                Path::FilterExpr(expr) | Path::Expr(expr) => {
+                    let res = self.eval_filter_expr(item.clone(), expr)?.unwrap_or(false);
+                    if res {
+                        self.items.push_back(item);
+                    }
+                }
             }
         }
         Ok(true)
